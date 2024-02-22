@@ -2,11 +2,18 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-# hyperparameters
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.trainers import BpeTrainer
+
+import os.path
+
+# अतिप्राचल (hyperparameters)
 batch_size = 64 # how many independent sequences will we process in parallel?
 block_size = 256 # what is the maximum context length for predictions?
-max_iters = 5000
-eval_interval = 500
+max_iters = 5000 
+eval_interval = 10
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
@@ -16,23 +23,41 @@ n_layer = 6
 dropout = 0.2
 # ------------
 
+# संचिका पथ (file paths)
+input_text_path = 'hi.txt'
+tokenizer_path = 'saved_tokenizer' 
+model_path = 'saved_model' 
+# ------------
+
+eval_iters = 200
+
 torch.manual_seed(1337)
 
-# wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-with open('input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
+# यदि सहेजा गया tokenizer है तो उसको खोलें
+if os.path.isfile(tokenizer_path):
+  print('Pre-trained tokenizer file detected. Loading...')
+  tokenizer = Tokenizer.from_file(tokenizer_path)
+  print('Tokenizer loaded!')
+else:
+  tokenizer = Tokenizer(BPE())
+  tokenizer.pre_tokenizer = Whitespace()
+  trainer = BpeTrainer(vocab_size=10000, special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"])
+  tokenizer.train(files=[input_text_path], trainer=trainer)
+  tokenizer.save(tokenizer_path)
 
-# here are all the unique characters that occur in this text
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+# शब्दावली का परिमाण प्राप्त करें
+vocab_size = tokenizer.get_vocab_size()
+
+
+# आंकड़ा संचिका को खोलें और पढ़ें
+with open(input_text_path, 'r', encoding='utf-8') as f:
+  text = f.read()
+
+# आंकड़े को tokenizer द्वारा कूटलेखित कर के उसको torch.tensor में परिवर्तित करें
+data = torch.tensor(tokenizer.encode(text).ids, dtype=torch.long)
+del text
 
 # Train and test splits
-data = torch.tensor(encode(text), dtype=torch.long)
 n = int(0.9*len(data)) # first 90% will be train, rest val
 train_data = data[:n]
 val_data = data[n:]
@@ -196,12 +221,19 @@ class GPTLanguageModel(nn.Module):
         return idx
 
 model = GPTLanguageModel()
+print('Defining dummy model...')
+# यदि सहेजा गया प्रतिरूप है तो उसको खोलें
+if os.path.isfile(model_path):
+  model.load_state_dict(torch.load(model_path))
+  print('Loaded model.')
 m = model.to(device)
-# print the number of parameters in the model
-print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+print("Moved model to cuda device")
 
 # create a PyTorch optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+
+losses = estimate_loss()
+best_val = losses['val']
 
 for iter in range(max_iters):
 
@@ -209,17 +241,22 @@ for iter in range(max_iters):
     if iter % eval_interval == 0 or iter == max_iters - 1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if losses['val'] < best_val:
+            print("Saving new best model...")
+            torch.save(m.state_dict(), 'saved_model')
+            best_val = losses['val']
 
     # sample a batch of data
     xb, yb = get_batch('train')
 
     # evaluate the loss
-    logits, loss = model(xb, yb)
+    logits, loss = m(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
 # generate from the model
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+with open(model_path, 'w') as f:
+  idx = torch.zeros((1,1), dtype=torch.long, device=device)
+  f.write(tokenizer.decode(m.generate(idx , max_new_tokens=2000)[0].tolist()))
 #open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
